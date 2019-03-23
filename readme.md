@@ -19,6 +19,20 @@
   * [1、完成从order服务到product服务查询商品的远程调用](#1完成从order服务到product服务查询商品的远程调用)
   * [2、扣库存(远程调用)](#2扣库存远程调用)
   * [3、整合接口，打通下单流程](#3整合接口打通下单流程)
+* [四、改成多模块](#四改成多模块)
+
+  * [1、改成多模块原因](#1改成多模块原因)
+  * [2、改成多模块后的整体框架图](#2改成多模块后的整体框架图)
+  * [3、product相关依赖和代码改变](#3product相关依赖和代码改变)
+  * [4、order相关依赖和代码改变(有个注解记得加)](#4order相关依赖和代码改变有个注解记得加)
+* [五、统一配置中心](#五统一配置中心)
+
+  * [1、config-server介绍和配置](#1config-server介绍和配置)
+  * [2、config-client(order)配置](#2config-clientorder配置)
+  * [3、SpringCloud Bus自动刷新配置](#3springcloud-bus自动刷新配置)
+* [六、异步和消息](#六异步和消息)
+
+  * 
 
 ## 一、商品服务编码(product)
 
@@ -1252,4 +1266,862 @@ public class OrderServiceImpl implements OrderService {
 最后数据库的更改:
 
 ![2_9.png](images/2_9.png)
+
+## 四、改成多模块
+
+### 1、改成多模块原因
+
+上面虽然完成了商品模块和订单模块的代码，但是代码存在如下的问题：
+
+* 我们的实体类`ProductInfo`暴露给了`order`，实际中这样是不行的；
+* 我们在`order`服务中写了重复写了一份`ProductInfo`的代码，这也是冗余代码；
+* 我们的远程调用是自己在`order`这边写了一个`ProductClient`，这样不合理，因为两个服务要解耦，就不应该在`order`这边定义`Product`的服务，也就是不能将对方的服务定义到自己的服务中；应该将`ProductClient`定义到商品服务中。
+
+
+
+### 2、改成多模块后的整体框架图
+
+先给出我们重构后的整体依赖图:
+
+![4_1.png](images/4_1.png)
+
+![4_2.png](images/4_2.png)
+
+### 3、product相关依赖和代码改变
+
+首先`product`的总pom文件改成`pom`类型的，以及定义相关的版本和子模块。(注意打包方式改成`pom`)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.zxin</groupId>
+    <artifactId>product</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <modules>
+        <module>common</module>
+        <module>server</module>
+        <module>client</module>
+    </modules>
+
+    <name>product</name>
+    <packaging>pom</packaging> <!--注意打包方式-->
+
+    <description>Demo project for Spring Boot</description>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.1.3.RELEASE</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <java.version>1.8</java.version>
+        <spring-cloud.version>Greenwich.SR1</spring-cloud.version>
+
+        <product-common.version>0.0.1-SNAPSHOT</product-common.version>
+
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>com.zxin</groupId>
+                <artifactId>product-common</artifactId>
+                <version>${product-common.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>
+
+```
+
+然后是`product-server`的`pom`中要改成`parent`是`product`:
+
+```xml
+<parent>
+    <artifactId>product</artifactId>
+    <groupId>com.zxin</groupId>
+    <version>0.0.1-SNAPSHOT</version>
+</parent>
+<modelVersion>4.0.0</modelVersion>
+<artifactId>product-server</artifactId>
+
+<description>Demo project for Spring Boot</description>
+
+```
+
+其他的`pom`文件更改也是类似。
+
+然后就是我们在`product-common`中增加了两个给外界暴露的类:
+
+这个类和`CartDTO`是一样的；
+
+```java
+@Data
+public class DecreaseStockInput {
+
+    private String productId;
+
+    private Integer productQuantity;
+
+    public DecreaseStockInput() {
+    }
+
+    public DecreaseStockInput(String productId, Integer productQuantity) {
+        this.productId = productId;
+        this.productQuantity = productQuantity;
+    }
+}
+```
+
+下面这个类和`ProductInfo`一样的:
+
+```java
+@Data
+public class ProductInfoOutput {
+
+    private String productId;
+
+    /** 名字. */
+    private String productName;
+
+    /** 单价. */
+    private BigDecimal productPrice;
+
+    /** 库存. */
+    private Integer productStock;
+
+    /** 描述. */
+    private String productDescription;
+
+    /** 小图. */
+    private String productIcon;
+
+    /** 状态, 0正常1下架. */
+    private Integer productStatus;
+
+    /** 类目编号. */
+    private Integer categoryType;
+}
+```
+
+然后注意需要更改的类:
+
+* `ProductService`；
+* `ProductServiceImpl`；
+* `Controller`中暴露给`order`的两个方法；
+
+```java
+public interface ProductService {
+
+    /**
+     * 查询所有在架 (up)商品
+     */
+    List<ProductInfo> findUpAll();
+
+
+    /**
+     * 查询商品列表
+     * @param productIdList
+     * @return
+     */
+    List<ProductInfoOutput> findList(List<String> productIdList);
+
+    /**
+     * 扣库存
+     * @param decreaseStockInputList
+     */
+    void decreaseStock(List<DecreaseStockInput> decreaseStockInputList);
+}
+
+```
+
+```java
+@Service
+public class ProductServiceImpl implements ProductService{
+
+    // Dao层注入到Service层
+    @Autowired
+    private ProductInfoRepository productInfoRepository;
+
+    @Override
+    public List<ProductInfo> findUpAll() {
+        return productInfoRepository.findByProductStatus(ProductStatusEnum.UP.getCode()); // 枚举, 在架的状态
+    }
+
+    // 后来加的, 再后来改成了多模块
+    @Override
+    public List<ProductInfoOutput> findList(List<String> productIdList) {
+        // 改写之前的代码
+//        return productInfoRepository.findByProductIdIn(productIdList);
+        // 多模块之后的, 将List<ProductInfo>转换成 ProductInfoOutput
+        return productInfoRepository.findByProductIdIn(productIdList).stream()
+                .map(e -> {
+                    ProductInfoOutput output = new ProductInfoOutput();
+                    BeanUtils.copyProperties(e, output);
+                    return output;
+                })
+                .collect(Collectors.toList());
+    }
+
+    // 后来加的， 扣库存的
+    @Override
+    public void decreaseStock(List<DecreaseStockInput> decreaseStockInputList) {
+
+        // 改写之前代码
+//
+//        for(CartDTO cartDTO : cartDTOList){
+//            Optional<ProductInfo> productInfoOptional = productInfoRepository.findById(cartDTO.getProductId());
+//            //判断商品是否存在
+//            if(!productInfoOptional.isPresent()){ //如果商品不存在 ,抛出一个异常
+//                throw new ProductException(ResultEnum.PRODUCT_NOT_EXIST);
+//            }
+//            // 如果商品存在，还需要判断一下数量
+//            ProductInfo productInfo = productInfoOptional.get();
+//            Integer result = productInfo.getProductStock() - cartDTO.getProductQuantity();
+//            if(result < 0) { //库存不够
+//                throw new ProductException(ResultEnum.PRODUCT_STOCK_ERROR);
+//            }
+//
+//            productInfo.setProductStock(result);
+//            /**
+//             * 网上看到一个问题, 但我这里应该没有问题.
+//             * JpaRepository的save(product)方法做更新操作,更新商品的库存和价格，所以入参的product只
+//              设置了商品的库存和价格，结果调用完save方法后，除了库存和价格的数据变了，其他字段全部被更新成了null
+//             */
+//            productInfoRepository.save(productInfo); // 保存更新
+//        }
+
+        decreaseStockProcess(decreaseStockInputList);
+    }
+
+
+    @Transactional
+    public List<ProductInfo> decreaseStockProcess(List<DecreaseStockInput> decreaseStockInputList) {
+        List<ProductInfo> productInfoList = new ArrayList<>();
+
+        for (DecreaseStockInput decreaseStockInput: decreaseStockInputList) {
+            Optional<ProductInfo> productInfoOptional = productInfoRepository.findById(decreaseStockInput.getProductId());
+            //判断商品是否存在
+            if (!productInfoOptional.isPresent()){
+                throw new ProductException(ResultEnum.PRODUCT_NOT_EXIST);
+            }
+
+            ProductInfo productInfo = productInfoOptional.get();
+            //库存是否足够
+            Integer result = productInfo.getProductStock() - decreaseStockInput.getProductQuantity();
+            if (result < 0) {
+                throw new ProductException(ResultEnum.PRODUCT_STOCK_ERROR);
+            }
+
+            productInfo.setProductStock(result);
+            productInfoRepository.save(productInfo);
+
+            productInfoList.add(productInfo);
+        }
+        return productInfoList;
+    }
+}
+
+```
+
+```java
+    /**
+     * 获取商品列表(专门给订单服务用的)
+     *
+     * 注意这里的@RequestBody的用法 参考: https://blog.csdn.net/justry_deng/article/details/80972817
+     * @param productIdList
+     * @return
+     */
+//    @GetMapping("/listForOrder") // 切记不要用 GetMapping
+    @PostMapping("/listForOrder")
+    public List<ProductInfoOutput> listForOrder(@RequestBody List<String>productIdList){ // 注意这里的@RequestBody的用法
+        return productService.findList(productIdList);
+    }
+
+    // 扣库存(供 order 调用)
+    @PostMapping("/decreaseStock")
+    public void decreaseStock(@RequestBody List<DecreaseStockInput> decreaseStockInputList) {
+        productService.decreaseStock(decreaseStockInputList);
+    }
+```
+
+最后，我们还要在`product-client`中添加一个`FeignClient`供`order`远程调用:
+
+```java
+@FeignClient(name = "product", fallback = ProductClient.ProductClientFallback.class)
+public interface ProductClient {
+
+    @PostMapping("/product/listForOrder")
+    List<ProductInfoOutput> listForOrder(@RequestBody List<String> productIdList);
+
+    @PostMapping("/product/decreaseStock")
+    void decreaseStock(@RequestBody List<DecreaseStockInput> decreaseStockInputList);
+
+    @Component
+    static class ProductClientFallback implements ProductClient {
+
+        @Override
+        public List<ProductInfoOutput> listForOrder(List<String> productIdList) {
+            return null;
+        }
+
+        @Override
+        public void decreaseStock(List<DecreaseStockInput> decreaseStockInputList) {
+
+        }
+    }
+}
+```
+
+### 4、order相关依赖和代码改变(有个注解记得加)
+
+注意我们`order`服务这边，`order-client`和`client-common`基本没有使用。
+
+然后看一下`order`这边更改。
+
+首先也是`pom`文件改变:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<groupId>com.zxin</groupId>
+	<artifactId>order</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<modules>
+		<module>client</module>
+		<module>common</module>
+		<module>server</module>
+	</modules>
+	<packaging>pom</packaging>
+
+	<name>order</name>
+	<description>Demo project for Spring Boot</description>
+
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>2.1.3.RELEASE</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+
+	<properties>
+		<java.version>1.8</java.version>
+		<spring-cloud.version>Greenwich.SR1</spring-cloud.version>
+
+		<product-client.version>0.0.1-SNAPSHOT</product-client.version>
+		<product-common.version>0.0.1-SNAPSHOT</product-common.version>
+	</properties>
+
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.springframework.cloud</groupId>
+				<artifactId>spring-cloud-dependencies</artifactId>
+				<version>${spring-cloud.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+
+			<!--将版本控制好-->
+			<dependency>
+				<groupId>com.zxin</groupId>
+				<artifactId>product-client</artifactId>
+				<version>${product-client.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>com.zxin</groupId>
+				<artifactId>product-common</artifactId>
+				<version>${product-common.version}</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+</project>
+
+```
+
+我们在`order-server`只需要改变`OrderServiceImpl`:
+
+```java
+@Service
+public class OrderServiceImpl implements OrderService {
+
+    // 这里需要注入两个 Repository
+
+    @Autowired
+    private OrderDetailRepository orderDetailRepository;
+    @Autowired
+    private OrderMasterRepository orderMasterRepository;
+
+    @Autowired
+    private ProductClient productClient; // 需要远程调用 ，注意这个是product中的ProductClient, 不是自己服务的
+
+    @Override
+    public OrderDTO create(OrderDTO orderDTO) {
+
+        /**
+         *
+         2、查询商品信息 (需要调用远程服务 Feign)；
+         3、计算总价；
+         4、扣库存(调用商品服务)；
+         5、订单入库；  (这个可以做)
+         */
+        String orderId = KeyUtil.generateUniqueKey();
+
+        //  2、查询商品信息 (需要调用远程服务 Feign)；
+        List<String> productIdList = orderDTO.getOrderDetailList().stream()
+                .map(OrderDetail::getProductId)
+                .collect(Collectors.toList());
+
+//        List<ProductInfo> productInfoList = productClient.listForOrder(productIdList);//需要传递ProductId <List>
+        // 改成多模块之后，上面那句变成这句
+        List<ProductInfoOutput> productInfoList = productClient.listForOrder(productIdList);
+
+
+        // 3、计算总价；
+        BigDecimal orderAmount = new BigDecimal(BigInteger.ZERO);
+        for(OrderDetail orderDetail : orderDTO.getOrderDetailList()){
+
+            // 和查询到的商品的单价
+//            for(ProductInfo productInfo : productInfoList){
+                for(ProductInfoOutput productInfo : productInfoList){ // 改成多模块
+                    // 判断相等才计算
+                if(productInfo.getProductId().equals(orderDetail.getProductId())){
+                    // 单价 productInfo.getProductPrice()
+                    // 数量 orderDetail.getProductQuantity(
+                    orderAmount = productInfo.getProductPrice()
+                            .multiply(new BigDecimal(orderDetail.getProductQuantity()))
+                            .add(orderAmount);
+
+                    //给订单详情赋值
+                    BeanUtils.copyProperties(productInfo, orderDetail); //这种拷贝要注意值为null也会拷贝
+                    orderDetail.setOrderId(orderId);
+                    orderDetail.setDetailId(KeyUtil.generateUniqueKey()); // 每个Detail的Id
+
+                    // 订单详情入库
+                    orderDetailRepository.save(orderDetail);
+                }
+            }
+        }
+
+        // 4、扣库存(调用商品服务)；
+//        List<CartDTO> cartDTOList = orderDTO.getOrderDetailList().stream()
+//                .map(e -> new CartDTO(e.getProductId(), e.getProductQuantity()))
+//                .collect(Collectors.toList());
+//        productClient.decreaseStock(cartDTOList); //订单主库入库了
+        // 上面是多模块之前，　下面是多模块之后
+        List<DecreaseStockInput> decreaseStockInputList = orderDTO.getOrderDetailList().stream()
+                .map(e -> new DecreaseStockInput(e.getProductId(), e.getProductQuantity()))
+                .collect(Collectors.toList());
+        productClient.decreaseStock(decreaseStockInputList);
+
+
+        // 5、订单入库 (OrderMaster)
+        OrderMaster orderMaster = new OrderMaster();
+        orderDTO.setOrderId(orderId); // 生成唯一的订单逐渐(订单号)
+        BeanUtils.copyProperties(orderDTO, orderMaster); // 将orderDTO拷贝到orderMaster
+        orderMaster.setOrderAmount(orderAmount); // 设置订单总金额
+        orderMaster.setOrderStatus(OrderStatusEnum.NEW.getCode());
+        orderMaster.setPayStatus(PayStatusEnum.WAIT.getCode());
+
+        orderMasterRepository.save(orderMaster); //存在主仓库
+        return orderDTO;
+    }
+}
+
+```
+
+**但是这里的`ProductClient`已经不是在`order`服务中之前定义的`ProductClient`了，而是在`product-client`中的`ProductClient`了，这要千万注意，为此，我们必须在`order-server`的主类上加上一个注解**:
+
+```java
+// 改成多模块之后, 需要手动去扫描 product.client
+@EnableFeignClients(basePackages = "com.zxin.product.client")
+```
+
+即:
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient
+//@EnableFeignClients //记得加上这个
+// 改成多模块之后, 需要手动去扫描 product.client
+@EnableFeignClients(basePackages = "com.zxin.product.client")
+public class OrderServerApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(OrderServerApplication.class, args);
+	}
+
+}
+```
+
+更改这个之后，多模块差不多就完成了。
+
+## 五、统一配置中心
+
+原因:
+
+* 不方便维护；
+* 更新内容安全与权限；
+* 更新配置需要重复服务；
+
+这些可以使用`springcloud-conifg`来解决:
+
+![5_6.png](images/5_6.png)
+
+### 1、config-server介绍和配置
+
+我们添加一个`config`服务，记得添加相关`pom`依赖:
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-config-server</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+</dependency>
+```
+
+然后在主配置类上添加`config-server`的依赖:
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient
+@EnableConfigServer // 这个就是成为一个configServer的注解
+public class ConfigApplication {
+	public static void main(String[] args) {
+		SpringApplication.run(ConfigApplication.class, args);
+	}
+}
+```
+
+然后我们需要添加我们在`git`上创建一个项目来保存我们的`config`:
+
+这里我们将订单模块`order`的配置问拷贝一份放在`github`并命名为`order.yml`:
+
+<div align="center"> <img src="images/5_1.png"></div><br>
+
+然后我们需要在`config`项目中更改配置文件，添加我们的`url`:
+
+```yaml
+spring:
+  application:
+    name: config
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://github.com/ZXZxin/conifg-repo.git
+          username: ZXZxin
+          password: 1wailuoying
+          basedir: /home/zxzxin/IDEA/zxorder/config/basedir/
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+```
+
+然后我们启动项目并访问我们在git的配置文件：(上面的端口`8090`是我后来加上的)
+
+![5_2.png](images/5_2.png)
+
+为什么这里的配置文件需要加上一个后缀`-a`或者`-b`(或者`-xxx`)呢，而且不加就会报错呢？
+
+因为这个文件的格式是:(下面两种都可以)
+
+```txt
+/{name}-{profiles}.yml
+/{label}/{name}-{profiles}.yml
+```
+
+`name`: 指的是服务名。
+
+`profiles`: 环境。
+
+`label` : 分支(`branch`) (git的分支)
+
+我们可以增加相应的配置`order-dev.yml`:
+
+![5_3.png](images/5_3.png)
+
+### 2、config-client(order)配置
+
+现在`order`中引入依赖:
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-config-client</artifactId>
+</dependency>
+```
+
+将`config-client`的配置更改一下:(既然我们从git上读取配置，所以不需要在项目中配置了)，注意这里启动类不要加注解了。
+
+更改前:
+
+```yaml
+spring:
+  application:
+    name: order
+  datasource:
+    driver-class-name: com.mysql.jdbc.Driver
+    username: root
+    password: root
+    url: jdbc:mysql://127.0.0.1:3306/zxorder?characterEncoding=utf-8&useSSL=false  # 微服务可以用不同的数据库,但是这里为了方便，还是用同一个数据库
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+server:
+  port: 8081
+
+```
+
+更改后:(启用我们的配置)
+
+```yaml
+spring:
+  application:
+    name: order
+  cloud:
+    config:
+      discovery:
+        enabled: true
+        service-id: CONFIG
+      profile: dev  # 用我们那个order-dev,这个就是那个配置文件名字
+```
+
+但是这样就可以启动了吗，经过测试是不行的，因为我们的配置`spring`不知道该先加载哪一个，也就是说我们本来想要先加载配置文件，然后去`git`加载，但是`spring`不知道，它自己直接就去加载数据库，然后我们的配置文件中没有数据库，只有`git`的配置文件中才有数据库，所以就会报错。
+
+解决方案: 将`order-server`的配置文件的名字由`application.yml`改成`bootstrap.yml`（和那个前端框架没关系）。
+
+![5_4.png](images/5_4.png)
+
+> 那个时候，我在这里犯了一个很大的错误，好像在`git`的配置文件里面将`order-dev.yml`文件名还是里面的内容给写错了一点点，找了一个小时的bug。哭死。。。。。
+
+这里引申出一个问题，如果我们的`Eureka`端口不是`8761`有问题吗?
+
+我们这里将Eureka的地址改成`8762`，重启`order`服务后发现会报错，于是我们最终将那个配置`order`的`eureka`地址放到了`order`内部，`bootstrap.yml`配置文件如下:
+
+```yaml
+spring:
+  application:
+    name: order
+  cloud:
+    config:
+      discovery:
+        enabled: true
+        service-id: CONFIG
+      profile: test  # 用我们那个order-dev,这个就是那个配置文件名字
+
+# 这里后来需要拿出来，反正就是更改了 Eureka(8761~8762)之后需要这样
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8762/eureka
+```
+
+然后还要注意`spring-cloud`的配置会有一个互补配置的问题:
+
+![5_5.png](images/5_5.png)
+
+### 3、SpringCloud Bus自动刷新配置
+
+> 注意，我最后没有实现自动刷新，好像是有bug，具体可以参考[**这篇文章**](https://blog.csdn.net/wtdm_160604/article/details/83720391)。
+
+上面配置了一大堆，还是没有实现: 不需要重启项目就能更新配置。因为我们需要用到`SpringCloud-BUS`和消息队列`RabbitMQ`:
+
+![5_7.png](images/5_7.png)
+
+先安装`RabbitMQ`(使用`Docker`安装):
+
+```shell
+docker run -d --hostname my-rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3.7.13-management
+```
+
+然后我们在`config`项目和`order`项目中引入相关依赖:
+
+```xml
+<!--引入SpringCloud BUS这个组件-->
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-bus-amqp</artifactId>
+</dependency>
+```
+
+`RabbitMQ`这里不需要任何的配置，只需要启动即可，`SpringCloud`已经完成了自动配置。
+
+我们在`config`目录的配置文件下要更新配置，给外界暴露端口。
+
+```yaml
+spring:
+  application:
+    name: config
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://github.com/ZXZxin/conifg-repo.git
+          username: ZXZxin
+          password: 1wailuoying
+          basedir: /home/zxzxin/IDEA/zxorder/config/basedir/
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8762/eureka/
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+#management:
+#  endpoints:
+#    web:
+#      exposure:
+#        include: "*"
+```
+
+且在`github`上的配置文件的属性，我们在对应的访问属性的`Controller`上要加上`@RefreshScope`注解，不然就不会自动刷新。
+
+```java
+@RestController
+@RequestMapping("/env")
+@RefreshScope
+public class EnvTestController {
+
+    @Value("${env}")
+    public String env;
+
+    @GetMapping("/print")
+    public String print(){
+        return env;
+    }
+}
+```
+
+![5_8.png](images/5_8.png) 
+
+![5_9.png](images/5_9.png)
+
+
+
+## 六、异步和消息
+
+异步：**客户端请求不会阻塞进程，服务端的响应可以是非即时的**。也就是说，如果是异步的，客户端就会理所当然的认为: 响应就是不会被立即接收的。
+
+异步的常见形态:
+
+* **通知**: 单向请求；
+* **请求/异步响应** :  客户端发送请求到服务端，服务端异步响应请求，客户端不会阻塞，而且被设计成默认响应不会被立刻送达；
+* **消息**:  可以实现一对多形态的交互，比如**发布订阅模式**。
+
+MQ应用场景:
+
+* 异步处理；
+* 流量削峰(如果消息队列长度超过最大数量，应该直接抛弃用户请求)；
+* 日志处理；
+* 应用解耦；
+
+
+
+实战:
+
+在`order`模块中引入依赖:
+
+```xml
+<!--引入RabbitMQ-->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-amqp</artifactId>
+</dependency>
+```
+
+在`bootstrap`配置文件中添加`rabbitMQ`配置:(这里我还是放在`github`上的配置)
+
+```yaml
+spring:
+  application:
+    name: order
+  datasource:
+    driver-class-name: com.mysql.jdbc.Driver
+    username: root
+    password: root
+    url: jdbc:mysql://127.0.0.1:3306/zxorder?characterEncoding=utf-8&useSSL=false  # 微服务可以用不同的数据库,但是这里为了方便，还是用同一个数据库
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+server:
+  port: 8081
+env:
+  test
+```
+
+
+
+简单测试MQ:
+
+在`message`包下面写一个消息接收类:
+
+```java
+@Slf4j
+@Component
+public class MQReceiver {
+
+    @RabbitListener(queues = "myQueue")
+    public void process(String message){
+        log.info("MqReceiver: {}", message);
+    }
+}
+
+```
+
+在`rabbitMQ`的控制面板上加上对应的消息队列`myQueue`:
+
+![5_10.png](images/5_10.png)
+
+编写一个测试程序:
+
+```java
+@RunWith(SpringRunner.class)
+@SpringBootTest
+public class MQReceiverTest {
+
+    @Autowired
+    private AmqpTemplate amqpTemplate;
+
+    @Test
+    public void process() throws Exception {
+        amqpTemplate.convertAndSend("myQueue", "now" + new Date());
+    }
+}
+```
+
+对消息队列发送消息。
+
+结果：在控制台打印了我们的消息:
+
+![5_11.png](images/5_11.png)
+
+另一种方法是可以绑定一个`Exchange`:
 
