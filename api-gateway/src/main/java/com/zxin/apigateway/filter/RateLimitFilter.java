@@ -10,7 +10,7 @@ import static org.springframework.cloud.netflix.zuul.filters.support.FilterConst
 
 /**
  * Zuul过滤器实现限流
- * 使用Google实现的令牌过滤原则
+ * 使用Google实现的令牌过滤
  */
 @Component
 public class RateLimitFilter extends ZuulFilter{

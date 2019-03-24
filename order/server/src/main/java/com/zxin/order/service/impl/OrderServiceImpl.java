@@ -6,6 +6,8 @@ import com.zxin.order.dto.CartDTO;
 import com.zxin.order.dto.OrderDTO;
 import com.zxin.order.enums.OrderStatusEnum;
 import com.zxin.order.enums.PayStatusEnum;
+import com.zxin.order.enums.ResultEnum;
+import com.zxin.order.exception.OrderException;
 import com.zxin.order.repository.OrderDetailRepository;
 import com.zxin.order.repository.OrderMasterRepository;
 import com.zxin.order.service.OrderService;
@@ -16,12 +18,15 @@ import com.zxin.product.common.ProductInfoOutput;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.CollectionUtils;
 
 //import com.zxin.order.client.ProductClient;  //改成多模块之后，就不是导入这个了
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Service
@@ -38,6 +43,7 @@ public class OrderServiceImpl implements OrderService {
     private ProductClient productClient; // 需要远程调用 ，注意这个是product中的ProductClient, 不是自己服务的
 
     @Override
+    @Transactional
     public OrderDTO create(OrderDTO orderDTO) {
 
         /**
@@ -106,6 +112,40 @@ public class OrderServiceImpl implements OrderService {
         orderMaster.setPayStatus(PayStatusEnum.WAIT.getCode());
 
         orderMasterRepository.save(orderMaster); //存在主仓库
+        return orderDTO;
+    }
+
+    // 完结订单
+    @Override
+    @Transactional
+    public OrderDTO finish(String orderId) {
+
+        // 1、先查询订单
+        Optional<OrderMaster> orderMasterOptional = orderMasterRepository.findById(orderId);
+        if(!orderMasterOptional.isPresent()){
+            throw new OrderException(ResultEnum.ORDER_NOT_EXIST);
+        }
+
+
+        // 2、判断订单状态 (并不是所有订单都可以定为完结)
+        OrderMaster orderMaster = orderMasterOptional.get();
+        if (OrderStatusEnum.NEW.getCode() != orderMaster.getOrderStatus()) {
+            throw new OrderException(ResultEnum.ORDER_STATUS_ERROR);
+        }
+
+        //3. 修改订单状态为完结
+        orderMaster.setOrderStatus(OrderStatusEnum.FINISHED.getCode());
+        orderMasterRepository.save(orderMaster);
+
+        //查询订单详情 ，为了返回orderDTO
+        List<OrderDetail> orderDetailList = orderDetailRepository.findByOrderId(orderId);
+        if (CollectionUtils.isEmpty(orderDetailList)) {
+            throw new OrderException(ResultEnum.ORDER_DETAIL_NOT_EXIST);
+        }
+        OrderDTO orderDTO = new OrderDTO();
+        BeanUtils.copyProperties(orderMaster, orderDTO);
+        orderDTO.setOrderDetailList(orderDetailList);
+
         return orderDTO;
     }
 }

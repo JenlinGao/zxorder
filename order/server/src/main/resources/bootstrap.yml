@@ -14,8 +14,11 @@ spring:
           content-type: application/json
 
 
+
 # 这里后来需要拿出来，反正就是更改了 Eureka(8761~8762)之后需要这样
 eureka:
   client:
     service-url:
       defaultZone: http://localhost:8762/eureka
+
+

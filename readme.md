@@ -41,7 +41,8 @@
   * [1、网关和Zuul介绍](#1网关和zuul介绍)
   * [2、基本配置服务网关](#2基本配置服务网关)
   * [3、限流](#3限流)
-  * [4、对权限进行统一校验](#4对权限进行统一校验)
+  * [4、实现买家卖家访问权限前的工作-添加user服务](#4实现买家卖家访问权限前的工作添加user服务)
+  * [5、对买家和卖家进行权限校验](#5对买家和卖家进行权限校验)
 
 ## 一、商品服务编码(product)
 
@@ -2707,9 +2708,9 @@ public class RateLimitFilter extends ZuulFilter{
 }
 ```
 
-### 4、对权限进行统一校验
+### 4、实现买家卖家访问权限前的工作-添加user服务
 
-实现对买家和卖家的访问权限设置:
+我们要实现对买家和卖家的访问权限设置:
 
 ```java
 /order/create  只能买家访问
@@ -2783,3 +2784,351 @@ server:
 ```
 
 ![7_4.png](images/7_4.png)
+
+相关业务代码:（实现通过openid来查询`UserInfo`）
+
+`DAO`
+
+```java
+public interface UserInfoRepository extends JpaRepository<UserInfo, String>{
+    UserInfo findByOpenid(String openid);
+}
+```
+
+`Service`:
+
+```java
+public interface UserService {
+
+	/**
+	 * 通过openid来查询用户信息
+	 * @param openid
+	 * @return
+	 */
+	UserInfo findByOpenid(String openid);
+}
+
+@Service
+public class UserServiceImpl implements UserService {
+
+    @Autowired
+    private UserInfoRepository repository;
+
+    /**
+     * 通过openid来查询用户信息
+     * @param openid
+     * @return
+     */
+    @Override
+    public UserInfo findByOpenid(String openid) {
+        return repository.findByOpenid(openid);
+    }
+}
+```
+
+然后我们编写`Controller`，注意:
+
+* 这里要完成买家和卖家的登录；
+* 需要验证是否已经注册，这里就直接模拟只有两个用户；
+* 然后需要验证角色；
+* 在卖家端，需要在redis设置`key=UUID, value=xyz`
+
+```java
+@RestController
+@RequestMapping("/login")
+public class LoginController {
+
+	@Autowired
+	private UserService userService;
+
+	@Autowired
+	private StringRedisTemplate stringRedisTemplate;
+
+	/**
+	 * 买家登录
+	 * @param openid
+	 * @param response
+	 * @return
+	 */
+	@GetMapping("/buyer")
+	public ResultVO buyer(@RequestParam("openid") String openid,
+						  HttpServletResponse response) {
+		//1. openid和数据库里的数据是否匹配
+		// 从数据库中取出来
+		UserInfo userInfo = userService.findByOpenid(openid);
+
+		if (userInfo == null) { // 登录失败, 没有注册
+			return ResultVOUtil.error(ResultEnum.LOGIN_FAIL);
+		}
+
+		//2. 判断角色 , 是不是买家
+		if (RoleEnum.BUYER.getCode() != userInfo.getRole()) {
+			return ResultVOUtil.error(ResultEnum.ROLE_ERROR);
+		}
+
+		//3. cookie里设置openid=abc
+		CookieUtil.set(response, CookieConstant.OPENID, openid, CookieConstant.expire);
+
+		return ResultVOUtil.success();
+	}
+
+	@GetMapping("/seller")
+	public ResultVO seller(@RequestParam("openid") String openid,
+						  HttpServletRequest request,
+						  HttpServletResponse response) {
+		//判断是否已登录, 防止产生多个重复的uuid
+		Cookie cookie = CookieUtil.get(request, CookieConstant.TOKEN);
+		if (cookie != null &&
+				!StringUtils.isEmpty(stringRedisTemplate.opsForValue().get(
+						String.format(RedisConstant.TOKEN_TEMPLATE, cookie.getValue())))) {
+			return ResultVOUtil.success();
+		}
+
+		//1. openid和数据库里的数据是否匹配
+		UserInfo userInfo = userService.findByOpenid(openid);
+		if (userInfo == null) {
+			return ResultVOUtil.error(ResultEnum.LOGIN_FAIL);
+		}
+
+		//2. 判断角色, 是不是卖家
+		if (RoleEnum.SELLER.getCode() != userInfo.getRole()) {
+			return ResultVOUtil.error(ResultEnum.ROLE_ERROR);
+		}
+
+		//3. redis设置key=UUID, value=xyz
+		String token = UUID.randomUUID().toString();
+
+		stringRedisTemplate.opsForValue().set(
+				String.format(RedisConstant.TOKEN_TEMPLATE, token),
+				openid,
+				CookieConstant.expire,
+				TimeUnit.SECONDS);
+
+		//4. cookie里设置token=UUID
+		CookieUtil.set(response, CookieConstant.TOKEN, token, CookieConstant.expire);
+
+		return ResultVOUtil.success();
+	}
+}
+```
+
+其他相关代码如`enum、vo、dataobject、constant、util`具体看代码。
+
+接下来就要实现Zuul的权限校验。
+
+我们先需要在`order`中实现订单的完结，在`service`中添加`finish()`方法:
+
+```java
+public interface OrderService {
+
+    // 这个就是创建订单
+    OrderDTO create(OrderDTO orderDTO);
+
+    // 完结订单(只能卖家操作)
+    OrderDTO finish(String orderId);
+} 
+```
+
+在OrderServiceImpl中增加实现:
+
+```java
+    // 完结订单
+    @Override
+    @Transactional
+    public OrderDTO finish(String orderId) {
+
+        // 1、先查询订单
+        Optional<OrderMaster> orderMasterOptional = orderMasterRepository.findById(orderId);
+        if(!orderMasterOptional.isPresent()){
+            throw new OrderException(ResultEnum.ORDER_NOT_EXIST);
+        }
+
+        // 2、判断订单状态 (并不是所有订单都可以定为完结)
+        OrderMaster orderMaster = orderMasterOptional.get();
+        if (OrderStatusEnum.NEW.getCode() != orderMaster.getOrderStatus()) {
+            throw new OrderException(ResultEnum.ORDER_STATUS_ERROR);
+        }
+
+        //3. 修改订单状态为完结
+        orderMaster.setOrderStatus(OrderStatusEnum.FINISHED.getCode());
+        orderMasterRepository.save(orderMaster);
+
+        //查询订单详情 ，为了返回orderDTO
+        List<OrderDetail> orderDetailList = orderDetailRepository.findByOrderId(orderId);
+        if (CollectionUtils.isEmpty(orderDetailList)) {
+            throw new OrderException(ResultEnum.ORDER_DETAIL_NOT_EXIST);
+        }
+        OrderDTO orderDTO = new OrderDTO();
+        BeanUtils.copyProperties(orderMaster, orderDTO);
+        orderDTO.setOrderDetailList(orderDetailList);
+
+        return orderDTO;
+    }
+```
+
+在OrderController中增加`finish`方法:
+
+```java
+    /**
+     * 完结订单
+     * @param orderId
+     * @return
+     */
+    @PostMapping("/finish")
+    public ResultVO<OrderDTO> finish(@RequestParam("orderId")String orderId){
+        return ResultVOUtil.success(orderService.finish(orderId));
+    }
+```
+
+测试:
+
+![7_6.png](images/7_6.png)
+
+再提交一次就会出现错误，因为已经不是新订单了。
+
+<div align="center"><img src="images/7_7.png"></div><br>
+
+
+
+### 5、对买家和卖家进行权限校验
+
+买家特征: `/order/create`只能买家访问(Cookie里面有openid)
+
+卖家特征: `/order/finish`只能卖家访问(Cookie里面有token，redis里面有值)
+
+上面括号里面两个都是我们在`user`服务中已经搞定了的。
+
+要实现只能买家或者只能卖家访问，所以需要联想到`Cookie`，这里先看一个问题，我们访问的时候，居然发现浏览器的`Cookie`没有值，这是为什么呢？，因为网关那个敏感属性屏蔽掉了`Cookie`。
+
+![7_8.png](images/7_8.png)
+
+所以我们在网关配置中关闭，设置，这里设置还是放在`github`：
+
+![7_9.png](images/7_9.png)
+
+再次更新，就可以看到`open-id`和`token`了:
+
+![7_10.png](images/7_10.png)
+
+添加权限校验：
+
+```java
+
+/**
+ * 权限拦截
+ * 区分买家和卖家
+ */
+public class AuthBuyerFilter extends ZuulFilter {
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    public String filterType() {
+        return PRE_TYPE;
+    }
+
+    @Override
+    public int filterOrder() {
+        return PRE_DECORATION_FILTER_ORDER - 1;
+    }
+
+    @Override
+    public boolean shouldFilter() {
+
+        RequestContext requestContext = RequestContext.getCurrentContext();
+        HttpServletRequest request = requestContext.getRequest();
+
+        // 是否拦截
+        if ("/order/order/create".equals(request.getRequestURI())) {
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public Object run() throws ZuulException {
+        RequestContext requestContext = RequestContext.getCurrentContext();
+        HttpServletRequest request = requestContext.getRequest();
+
+        /**
+         * /order/create只能买家访问(cookie里有openid)
+         * /order/finish只能卖家访问(cookie里有token，并且对应的redis中的值)
+         * /product/list都可以访问
+         */
+
+        // 买家 拦截
+        Cookie cookie = CookieUtil.get(request, "openid");
+        if (cookie == null || StringUtils.isEmpty(cookie.getValue())) {
+            requestContext.setSendZuulResponse(false);
+            requestContext.setResponseStatusCode(HttpStatus.UNAUTHORIZED.value());
+        }
+
+        return null;
+    }
+}
+
+```
+
+```java
+/**
+ * 权限拦截
+ * 区分买家和卖家
+ */
+public class AuthSellerFilter extends ZuulFilter {
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    public String filterType() {
+        return PRE_TYPE;
+    }
+
+    @Override
+    public int filterOrder() {
+        return PRE_DECORATION_FILTER_ORDER - 1;
+    }
+
+    @Override
+    public boolean shouldFilter() {
+        RequestContext requestContext = RequestContext.getCurrentContext();
+        HttpServletRequest request = requestContext.getRequest();
+
+        if ("/order/order/finish".equals(request.getRequestURI())) {
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public Object run() throws ZuulException {
+        RequestContext requestContext = RequestContext.getCurrentContext();
+        HttpServletRequest request = requestContext.getRequest();
+
+        /**
+         * /order/create只能买家访问(cookie里有openid)
+         * /order/finish只能卖家访问(cookie里有token，并且对应的redis中的值)
+         * /product/list都可以访问
+         */
+
+        // 卖家
+        Cookie cookie = CookieUtil.get(request, "token");
+        if (cookie == null
+                || StringUtils.isEmpty(cookie.getValue())
+                || StringUtils.isEmpty(stringRedisTemplate.opsForValue().get(
+                String.format(RedisConstant.TOKEN_TEMPLATE, cookie.getValue())))) {
+
+            requestContext.setSendZuulResponse(false);
+            requestContext.setResponseStatusCode(HttpStatus.UNAUTHORIZED.value());
+        }
+        return null;
+    }
+}
+
+```
+
+权限这里我还没有处理好(没有登陆就可以下单)，到时候回过头来再看看。
+
+![7_11.png](images/7_11.png)
+
