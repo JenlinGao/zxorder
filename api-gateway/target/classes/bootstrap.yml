@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    config:
+      discovery:
+        enabled: true
+        service-id: CONFIG
+      profile: test  # 用我们那个order-dev,这个就是那个配置文件名字
+
+# 这里后来需要拿出来，反正就是更改了 Eureka(8761~8762)之后需要这样
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8762/eureka
+server:
+  port: 9000

@@ -2,7 +2,6 @@ package com.zxin.order.service.impl;
 
 import com.zxin.order.dataobject.OrderDetail;
 import com.zxin.order.dataobject.OrderMaster;
-import com.zxin.order.dataobject.ProductInfo;
 import com.zxin.order.dto.CartDTO;
 import com.zxin.order.dto.OrderDTO;
 import com.zxin.order.enums.OrderStatusEnum;

@@ -7,6 +7,11 @@ spring:
         enabled: true
         service-id: CONFIG
       profile: test  # 用我们那个order-dev,这个就是那个配置文件名字
+    stream:  # 建立 SpringCloud Stream的分组
+      bindings:
+        myMessage:
+          group: order
+          content-type: application/json
 
 
 # 这里后来需要拿出来，反正就是更改了 Eureka(8761~8762)之后需要这样

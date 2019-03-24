@@ -1,7 +1,6 @@
 package com.zxin.order.client;
 
 
-import com.zxin.order.dataobject.ProductInfo;
 import com.zxin.order.dto.CartDTO;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.PostMapping;

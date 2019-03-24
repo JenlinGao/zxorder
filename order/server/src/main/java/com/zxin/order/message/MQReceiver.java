@@ -33,9 +33,9 @@ public class MQReceiver {
      * 比如数码供应商，水果供应商
      */
     @RabbitListener(bindings = @QueueBinding(
-            value = @Queue("myOrder"),
-            key = "computer", // 路由key ,这个就是 Exchange和Queue之间的绑定关系
-            exchange = @Exchange("myOrderExchange")
+            exchange = @Exchange("myOrder"),
+            value = @Queue("myOrderQueue"),
+            key = "computer" // 路由key ,这个就是 Exchange和Queue之间的绑定关系
     ))
     public void processComputer(String message){
         log.info("computer MqReceiver: {}", message);
@@ -46,9 +46,9 @@ public class MQReceiver {
      * 比如数码供应商，水果供应商
      */
     @RabbitListener(bindings = @QueueBinding(
-            value = @Queue("myOrder"),
-            key = "fruit", // 路由key ,这个就是 Exchange和Queue之间的绑定关系
-            exchange = @Exchange("myFruitExchange")
+            exchange = @Exchange("myOrder"),
+            value = @Queue("myFruitQueue"),
+            key = "fruit" // 路由key ,这个就是 Exchange和Queue之间的绑定关系
     ))
     public void processFruit(String message){
         log.info("fruit MqReceiver: {}", message);

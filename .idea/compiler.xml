@@ -6,6 +6,7 @@
         <sourceOutputDir name="target/generated-sources/annotations" />
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
+        <module name="api-gateway" />
         <module name="config" />
         <module name="eureka" />
         <module name="order-client" />
@@ -14,10 +15,12 @@
         <module name="product-client" />
         <module name="product-common" />
         <module name="product-server" />
+        <module name="user-server" />
         <module name="zxorder" />
       </profile>
     </annotationProcessing>
     <bytecodeTargetLevel>
+      <module name="api-gateway" target="1.8" />
       <module name="client" target="1.8" />
       <module name="common" target="1.8" />
       <module name="config" target="1.8" />
@@ -31,6 +34,8 @@
       <module name="product-common" target="1.8" />
       <module name="product-server" target="1.8" />
       <module name="server" target="1.8" />
+      <module name="user" target="1.8" />
+      <module name="user-server" target="1.8" />
       <module name="zxorder" target="1.8" />
     </bytecodeTargetLevel>
   </component>

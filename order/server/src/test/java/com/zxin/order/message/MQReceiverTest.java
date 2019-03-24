@@ -30,6 +30,7 @@ public class MQReceiverTest {
     // 订单服务下单之后要发送消息
     @Test
     public void sendOrder() throws Exception {
+        // exchange, routingKey，message
         amqpTemplate.convertAndSend("myOrder","computer", "now" + new Date());
     }
 }

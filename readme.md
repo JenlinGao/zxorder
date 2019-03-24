@@ -32,7 +32,16 @@
   * [3、SpringCloud Bus自动刷新配置](#3springcloud-bus自动刷新配置)
 * [六、异步和消息](#六异步和消息)
 
-  * 
+  * [1、RabbitMQ简单使用](#1rabbitmq简单使用)
+  * [2、SpringCloud Stream的使用](#2springcloud-stream的使用)
+  * [3、将消息队列应用到订单服务](#3将消息队列应用到订单服务)
+  * [4、原始流程总结和异步扣库存分析](#4原始流程总结和异步扣库存分析)
+* [七、服务网关Zuul](#七服务网关zuul)
+
+  * [1、网关和Zuul介绍](#1网关和zuul介绍)
+  * [2、基本配置服务网关](#2基本配置服务网关)
+  * [3、限流](#3限流)
+  * [4、对权限进行统一校验](#4对权限进行统一校验)
 
 ## 一、商品服务编码(product)
 
@@ -2041,7 +2050,7 @@ MQ应用场景:
 * 日志处理；
 * 应用解耦；
 
-
+### 1、RabbitMQ简单使用
 
 实战:
 
@@ -2076,8 +2085,6 @@ server:
 env:
   test
 ```
-
-
 
 简单测试MQ:
 
@@ -2125,3 +2132,654 @@ public class MQReceiverTest {
 
 另一种方法是可以绑定一个`Exchange`:
 
+且实现一个`Exchange`绑定多个`Queue`:
+
+![5_12.png](images/5_12.png)
+
+<div align="center"><img src="images/5_13.png"></div><br>
+
+在`MQReceiver`中的实现代码:
+
+```java
+/**
+* 虽然上面只用到了一个 ，但是实际可能需要一个队列对应多个服务，比如下面两个服务演示
+* myOrder这一个消息队列，对应两个Exchange，也就是两个服务
+* 比如数码供应商，水果供应商
+*/
+@RabbitListener(bindings = @QueueBinding(
+    exchange = @Exchange("myOrder"),
+    value = @Queue("myOrderQueue"),
+    key = "computer" // 路由key ,这个就是 Exchange和Queue之间的绑定关系
+))
+public void processComputer(String message){
+    log.info("computer MqReceiver: {}", message);
+}
+
+/**
+     * 虽然上面只用到了一个 ，但是实际可能需要多个服务
+     * 比如数码供应商，水果供应商
+     */
+@RabbitListener(bindings = @QueueBinding(
+    exchange = @Exchange("myOrder"),
+    value = @Queue("myFruitQueue"),
+    key = "fruit" // 路由key ,这个就是 Exchange和Queue之间的绑定关系
+))
+public void processFruit(String message){
+    log.info("fruit MqReceiver: {}", message);
+}
+```
+
+测试的是我们要指定:`exchange`、`routingKey`、以及要发送的消息:
+
+```java
+// 订单服务下单之后要发送消息
+@Test
+public void sendOrder() throws Exception {
+    // exchange, routingKey，message
+    amqpTemplate.convertAndSend("myOrder","computer", "now" + new Date());
+}
+```
+
+### 2、SpringCloud Stream的使用
+
+原因: 　比方说我们用到了RabbitMQ和Kafka，由于这两个消息中间件的架构上的不同，像RabbitMQ有exchange，kafka有Topic，partitions分区，这些中间件的差异性导致我们实际项目开发给我们造成了一定的困扰，我们如果用了两个消息队列的其中一种，
+
+后面的业务需求，我想往另外一种消息队列进行迁移，这时候无疑就是一个灾难性的，一大堆东西都要重新推倒重新做，因为它跟我们的系统耦合了，这时候springcloud Stream给我们提供了一种解耦合的方式。
+
+![5_14.png](images/5_14.png)
+
+**`Spring Cloud Stream`由一个中间件中立的核组成。应用通过Spring Cloud Stream插入的input(相当于消费者consumer，它是从队列中接收消息的)和output(相当于生产者producer，它是从队列中发送消息的。)通道与外界交流**。
+
+**通道通过指定中间件的Binder实现与外部代理连接**。业务开发者不再关注具体消息中间件，只需关注Binder对应用程序提供的抽象概念来使用消息中间件实现业务即可。
+
+>  具体参考[**这篇文章**](https://www.cnblogs.com/huangjuncong/p/9102843.html)。
+
+在`order`项目中引入依赖:
+
+```xml
+<!--引入SpringCloudStream-->
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-stream-rabbit</artifactId>
+</dependency>
+```
+
+定义一个接口`StreamClient`:
+
+写一个`StreamClient`接口，定义输入输出`inputs`和`outputs`:
+
+```java
+/**
+ * 使用SpringCloud定义的接口
+ */
+public interface StreamClient {
+
+    String INPUT = "myMessage";
+
+    String INPUT2 = "myMessage2";
+
+    @Input(StreamClient.INPUT)
+    SubscribableChannel input();
+
+    @Output(StreamClient.INPUT2)
+    MessageChannel output();
+}
+
+```
+
+同样，我们可以写一个和`MQ`类似的接收消息的类:
+
+```java
+@Component
+@EnableBinding(StreamClient.class)
+@Slf4j
+public class StreamReceiver {
+   
+    @StreamListener(value = StreamClient.INPUT)
+    @SendTo(StreamClient.INPUT2)
+    public String process(OrderDTO message) {
+        log.info("StreamReceiver: {}", message);
+        return "received.";
+    }
+
+    @StreamListener(value = StreamClient.INPUT2)
+    public void process2(String message) {
+        log.info("StreamReceiver2: {}", message);
+    }
+}
+```
+
+测试:
+
+```java
+@RunWith(SpringRunner.class)
+@SpringBootTest
+public class StreamReceiverTest {
+
+    @Autowired
+    private StreamClient streamClient;
+
+    @Test
+    public void process() throws Exception {
+        String message = "now " + new Date();
+        // 发送消息
+        streamClient.output().send(MessageBuilder.withPayload(message).build());
+    }
+}
+```
+
+> 上面测试最后还是有点问题。记录一下。好像INPUT定义那个字符串启动会有时候报错。
+
+但是上面的程序存在一个问题，就是当我们启动多个实例的时候，消息会发送到不同的实例，所以我们在配置文件中要建立一个分组: (也就是让两个实例只接收到一个消息)
+
+同时，因为在管理界面的`getMessage`中显示的是加密后的字符串，为了能看到对应的`json`字符串，配置一个``
+
+```yaml
+spring:
+  application:
+    name: order
+  cloud:
+    config:
+      discovery:
+        enabled: true
+        service-id: CONFIG
+      profile: test  # 用我们那个order-dev,这个就是那个配置文件名字
+    stream:  # 建立 SpringCloud Stream的分组
+      bindings:
+        myMessage:
+          group: order
+          content-type: application/json # 界面能看到json
+
+
+# 这里后来需要拿出来，反正就是更改了 Eureka(8761~8762)之后需要这样
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8762/eureka
+
+
+```
+
+### 3、将消息队列应用到订单服务
+
+应用到订单服务:
+
+![5_15.png](images/5_15.png)
+
+将`product`接入到配置中心，在`product`中加入`config-client`依赖:
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-config-client</artifactId>
+</dependency>
+```
+
+同时将`application.yml`也改成`bootstrap.yml`。将多余的配置放在github上:
+
+```yaml
+spring:
+  application:
+    name: product
+  cloud:
+    config:
+      discovery:
+        enabled: true
+        service-id: CONFIG
+      profile: test
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8762/eureka
+server:
+  port: 8082
+```
+
+`product-test.yml`配置文件如下:
+
+![5_16.png](images/5_16.png)
+
+然后在`product`服务中发送扣库存的消息，先引入AMQP依赖:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-amqp</artifactId>
+</dependency>
+```
+
+在product服务这边的`ProductServiceImpl.java`中加入消息发送逻辑代码：
+
+注意这里加入了发送`MQ`消息的代码: (注意要注入`AmqpTemplate`)
+
+**这里要注意一个问题**：
+
+MQ消息发送: 注意要在外面发送(发送一个List)，不能在里面一件一件发送，不然会产生问题，例如，第二件商品库存不够扣了，　如果第一件商品消息已经发送，就会产生错误。（中间可能抛出异常）
+
+所以要对整个购物车处理完之后，再发送MQ消息。
+
+```java
+  @Service
+public class ProductServiceImpl implements ProductService{
+
+    // Dao层注入到Service层
+    @Autowired
+    private ProductInfoRepository productInfoRepository;
+
+    @Override
+    public List<ProductInfo> findUpAll() {
+        return productInfoRepository.findByProductStatus(ProductStatusEnum.UP.getCode()); // 枚举, 在架的状态
+    }
+
+    //发送MQ消息
+    @Autowired
+    private AmqpTemplate amqpTemplate;
+
+    // 后来加的, 再后来改成了多模块
+    @Override
+    public List<ProductInfoOutput> findList(List<String> productIdList) {
+        // 改写之前的代码
+//        return productInfoRepository.findByProductIdIn(productIdList);
+        // 多模块之后的, 将List<ProductInfo>转换成 ProductInfoOutput
+        return productInfoRepository.findByProductIdIn(productIdList).stream()
+                .map(e -> {
+                    ProductInfoOutput output = new ProductInfoOutput();
+                    BeanUtils.copyProperties(e, output);
+                    return output;
+                })
+                .collect(Collectors.toList());
+    }
+
+    // 后来加的， 扣库存的
+    @Override
+    public void decreaseStock(List<DecreaseStockInput> decreaseStockInputList) {
+
+        List<ProductInfo> productInfoList = decreaseStockProcess(decreaseStockInputList);
+
+        //发送mq消息
+        List<ProductInfoOutput> productInfoOutputList = productInfoList.stream().map(e -> {
+            ProductInfoOutput output = new ProductInfoOutput();
+            BeanUtils.copyProperties(e, output);
+            return output;
+        }).collect(Collectors.toList());
+
+        //注意要在外面发送(发送一个List)，不能在里面一件一件发送，不然会产生问题，如果第一件商品消息已经发送，
+        // 发送MQ消息
+        amqpTemplate.convertAndSend("productInfo", JsonUtil.toJson(productInfoOutputList));
+
+    }
+
+
+    @Transactional
+    public List<ProductInfo> decreaseStockProcess(List<DecreaseStockInput> decreaseStockInputList) {
+        List<ProductInfo> productInfoList = new ArrayList<>();
+
+        for (DecreaseStockInput decreaseStockInput: decreaseStockInputList) {
+            Optional<ProductInfo> productInfoOptional = productInfoRepository.findById(decreaseStockInput.getProductId());
+            //判断商品是否存在
+            if (!productInfoOptional.isPresent()){
+                throw new ProductException(ResultEnum.PRODUCT_NOT_EXIST);
+            }
+
+            ProductInfo productInfo = productInfoOptional.get();
+            //库存是否足够
+            Integer result = productInfo.getProductStock() - decreaseStockInput.getProductQuantity();
+            if (result < 0) {
+                throw new ProductException(ResultEnum.PRODUCT_STOCK_ERROR);
+            }
+
+            productInfo.setProductStock(result);
+            productInfoRepository.save(productInfo);
+
+            productInfoList.add(productInfo);
+        }
+        return productInfoList;
+    }
+}
+```
+
+上面可以给消息队列发送消息了，然后看订单服务这边`order`:
+
+创建一个`ProductInfoReceiver.java`: （用来接收消息）
+
+接收消息的代码:
+
+```java
+@Component
+@Slf4j
+public class ProductInfoReceiver {
+
+	// 从MQ中拿到的是一个对象，放到redis中的要存那么多，就存库存的
+	private static final String PRODUCT_STOCK_TEMPLATE = "product_stock_%s";
+
+    //引入操作Redis的组件
+	@Autowired
+	private StringRedisTemplate stringRedisTemplate;
+
+	//接收MQ消息
+	@RabbitListener(queuesToDeclare = @Queue("productInfo")) // productInfo是创建的队列
+	public void process(String message) {
+
+		//message => ProductInfoOutput , 将接收到的消息转换成ProductInfoOutput，然后存储到redis中
+		List<ProductInfoOutput> productInfoOutputList = (
+				List<ProductInfoOutput>) JsonUtil.fromJson(message,
+				new TypeReference<List<ProductInfoOutput>>() {});
+
+		log.info("从队列【{}】接收到消息：{}", "productInfo", productInfoOutputList);
+
+		//存储到redis中
+		for (ProductInfoOutput productInfoOutput : productInfoOutputList) {
+			stringRedisTemplate.opsForValue().set(
+					String.format(PRODUCT_STOCK_TEMPLATE, productInfoOutput.getProductId()),
+					String.valueOf(productInfoOutput.getProductStock()));
+		}
+	}
+}
+
+```
+
+引入`redis`：
+
+```xml
+<!--引入redis-->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
+```
+
+在`github`中增加`redis`的配置:
+
+![5_17.png](images/5_17.png)
+
+最后利用`POSTMAN`来测试访问一波:
+
+```json
+http://localhost:8082/product/decreaseStock
+[{"productId":"157875196366160022","productQuantity":1}]
+```
+
+结果正确:
+
+<div align="center'><img src="images/5_19.png"></div><br>
+
+测试成功:
+
+查看`redis`数据库变化和MYSQL数据库变化。
+
+![5_18.png](images/5_18.png)
+
+查看MQ消息:
+
+![5_20.png](images/5_20.png)
+
+### 4、原始流程总结和异步扣库存分析
+
+`order`服务原始流程:
+
+* 查询商品信息(调用商品服务)；
+* 计算总价(生成订单详情)；
+* 商品服务扣库存(调用商品服务)；
+* 订单入库(生成订单)；
+
+我们可以将第四个步骤改成异步的。也就是订单入库，当没有成功的时候，就重试等待。
+
+![5_21.png](images/5_21.png)
+
+## 七、服务网关Zuul
+
+### 1、网关和Zuul介绍
+
+当前模块的问题:
+
+* 当前有很多微服务，那么客户端要怎么调用这些微服务呢？
+* 一个一个打交道吗？显然不太好。
+* 于是需要一个角色来充当`request`请求的统一入口。那就是服务网关。
+
+![5_23.png](images/5_23.png)
+
+服务网关 = 路由转发 + 过滤器。
+
+网关作用:
+
+* 稳定性，高可用；
+* 性能、并发性，安全性；
+* 扩展性；
+* 智能路由：接收外部一切请求，并转发到后端的对外服务open-service上去；
+* 权限校验：只校验用户向open-service服务的请求，不校验服务内部的请求。服务内部的请求有必要校验吗？
+* API监控：只监控经过网关的请求，以及网关本身的一些性能指标（例如，gc等）；
+* 限流：与监控配合，进行限流操作；
+
+<div align="center"><img src="images/5_22.png"></div><br>
+
+Zuul的四种过滤器API:
+
+* 前置`Pre`；
+* 路由`Route`；
+* 后置`Post`；
+* 错误`Error`；
+
+![5_24.png](images/5_24.png)
+
+### 2、基本配置服务网关
+
+引入`pom.xml`:
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-netflix-zuul</artifactId>
+</dependency>
+```
+
+`bootstrap.yml`配置:
+
+```yaml
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    config:
+      discovery:
+        enabled: true
+        service-id: CONFIG
+      profile: test  # 用我们那个order-dev,这个就是那个配置文件名字
+
+# 这里后来需要拿出来，反正就是更改了 Eureka(8761~8762)之后需要这样
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8762/eureka
+
+server:
+  port: 9000
+```
+
+在主配置类上添加`@EnableZuulProxy`:
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient
+@EnableZuulProxy
+public class ApiGatewayApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(ApiGatewayApplication.class, args);
+	}
+}
+```
+
+默认不需要配置就可以访问，默认规则: 
+
+![7_1.png](images/7_1.png)
+
+我们可以在配置文件中自定义配置：然后我又放到了`github`上:
+
+<div align="center"><img src="images/7_2.png"></div><br>
+
+> 这里还配置了一些请求参数设置忽略，比如默认我们获取不到`cookie`，但是可以配置`sensitiveHeaders`参数从而可以获取。
+
+我们还可以在主配置类上加上自动配置刷新组件:
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient
+@EnableZuulProxy
+public class ApiGatewayApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(ApiGatewayApplication.class, args);
+	}
+
+	@ConfigurationProperties("zuul")
+	@RefreshScope
+	public ZuulProperties zuulProperties(){
+		return new ZuulProperties();
+	}
+}
+
+```
+
+### 3、限流
+
+使用经典令牌限流规则:
+
+![7_3.png](images/7_3.png)
+
+在`apt-gateway`中添加过滤器:
+
+```java
+/**
+ * Zuul过滤器实现限流
+ * 使用Google实现的令牌过滤原则
+ */
+@Component
+public class RateLimitFilter extends ZuulFilter{
+
+	private static final RateLimiter RATE_LIMITER = RateLimiter.create(100);
+
+	/**
+	 * to classify a filter by type. Standard types in Zuul are "pre" for pre-routing filtering,
+	 * "route" for routing to an origin, "post" for post-routing filters, "error" for error handling.
+	 * We also support a "static" type for static responses see  StaticResponseFilter.
+	 * Any filterType made be created or added and run by calling FilterProcessor.runFilters(type)
+	 *
+	 * @return A String representing that type
+	 */
+	@Override
+	public String filterType() {
+		return PRE_TYPE;
+	}
+
+	/**
+	 * filterOrder() must also be defined for a filter. Filters may have the same  filterOrder if precedence is not
+	 * important for a filter. filterOrders do not need to be sequential.
+	 *
+	 * @return the int order of a filter
+	 */
+	@Override
+	public int filterOrder() {
+		return SERVLET_DETECTION_FILTER_ORDER - 1;
+	}
+
+	/**
+	 * a "true" return from this method means that the run() method should be invoked
+	 *
+	 * @return true if the run() method should be invoked. false will not invoke the run() method
+	 */
+	@Override
+	public boolean shouldFilter() {
+		return true;
+	}
+
+	/**
+	 * if shouldFilter() is true, this method will be invoked. this method is the core method of a ZuulFilter
+	 *
+	 * @return Some arbitrary artifact may be returned. Current implementation ignores it.
+	 */
+	@Override
+	public Object run() {
+		if (!RATE_LIMITER.tryAcquire()) {
+			throw new RateLimitException();
+		}
+		return null;
+	}
+}
+```
+
+### 4、对权限进行统一校验
+
+实现对买家和卖家的访问权限设置:
+
+```java
+/order/create  只能买家访问
+/order/finish  只能卖家访问
+/product/list  都可以访问
+```
+
+**怎么样才能区分买家和卖家呢**？
+
+**可以通过Cookie，所以他们必须要先登录之后才能获取信息，所以需要添加一个新的服务: `user`服务**。
+
+先给出登录API
+
+①买家登录
+
+```json
+GET /login/buyer
+
+参数 :  openid: abc
+
+返回  cookie里设置openid=abc
+
+{
+    code: 0,
+    msg: "成功",
+    data: null
+}
+```
+
+②卖家登录
+
+```json
+GET /login/seller
+参数:  openid: xyz
+
+返回  : cookie里设置token=UUID, redis设置key=UUID, value=xyz
+
+{
+    code: 0,
+    msg: "成功",
+    data: null
+}
+```
+
+于是我们来创建用户模块:(也是多模块服务)
+
+<div align="center"><img src="images/7_5.png"></div><br>
+
+
+
+在`user`服务中，也是`boostrap.yml`和github标准配置文件:
+
+```yaml
+spring:
+  application:
+    name: user
+  cloud:
+    config:
+      discovery:
+        enabled: true
+        service-id: CONFIG
+      profile: test  # 用我们那个order-dev,这个就是那个配置文件名字
+
+# 这里后来需要拿出来，反正就是更改了 Eureka(8761~8762)之后需要这样
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8762/eureka
+server:
+  port: 8083
+```
+
+![7_4.png](images/7_4.png)

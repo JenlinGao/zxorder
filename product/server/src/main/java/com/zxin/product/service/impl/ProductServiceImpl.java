@@ -10,6 +10,8 @@ import com.zxin.product.enums.ResultEnum;
 import com.zxin.product.exception.ProductException;
 import com.zxin.product.repository.ProductInfoRepository;
 import com.zxin.product.service.ProductService;
+import com.zxin.product.utils.JsonUtil;
+import org.springframework.amqp.core.AmqpTemplate;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -32,6 +34,10 @@ public class ProductServiceImpl implements ProductService{
     public List<ProductInfo> findUpAll() {
         return productInfoRepository.findByProductStatus(ProductStatusEnum.UP.getCode()); // 枚举, 在架的状态
     }
+
+    //发送MQ消息
+    @Autowired
+    private AmqpTemplate amqpTemplate;
 
     // 后来加的, 再后来改成了多模块
     @Override
@@ -76,7 +82,19 @@ public class ProductServiceImpl implements ProductService{
 //            productInfoRepository.save(productInfo); // 保存更新
 //        }
 
-        decreaseStockProcess(decreaseStockInputList);
+        List<ProductInfo> productInfoList = decreaseStockProcess(decreaseStockInputList);
+
+        //发送mq消息
+        List<ProductInfoOutput> productInfoOutputList = productInfoList.stream().map(e -> {
+            ProductInfoOutput output = new ProductInfoOutput();
+            BeanUtils.copyProperties(e, output);
+            return output;
+        }).collect(Collectors.toList());
+
+        //注意要在外面发送
+        // 发送MQ消息
+        amqpTemplate.convertAndSend("productInfo", JsonUtil.toJson(productInfoOutputList));
+
     }
 
 
