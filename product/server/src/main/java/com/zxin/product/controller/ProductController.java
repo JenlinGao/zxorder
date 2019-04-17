@@ -51,6 +51,7 @@ public class ProductController {
 
         // 4、构造数据
         List<ProductVO> productVOList = new ArrayList<>(); //第二层的商品
+
         for(ProductCategory productCategory : categoryList){ // 遍历类目
             ProductVO productVo = new ProductVO();//外层的一个
             productVo.setCategoryName(productCategory.getCategoryName());
